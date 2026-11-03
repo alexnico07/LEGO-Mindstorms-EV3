@@ -17,15 +17,21 @@ BASE_DIR = Direction.CLOCKWISE
 SHOULDER_DIR = Direction.CLOCKWISE
 ELBOW_DIR = Direction.CLOCKWISE  # no stop on the elbow, so this just sets which way is positive
 
+# Gear ratios = motor turns for every 1 turn of the joint.
+# 3 means the motor spins 3 times for one turn of the joint (a reduction).
+# If it turns out to be the other way round, change these to 1/3
+BASE_RATIO = 3
+SHOULDER_RATIO = 3
+ELBOW_RATIO = 1
+
 HOME_SPEED = 100   # deg/s at the motor shaft, kept slow on purpose
 HOME_DUTY = 30     # % torque limit while homing, so a stall doesn't strain the gears
-MOVE_SPEED = 100   # deg/s at the motor shaft for the test moves
+MOVE_SPEED = 150   # deg/s at the motor shaft for the test moves
 
-# Angles below are MOTOR shaft degrees (not arm degrees), because the gearing
-# between each motor and its joint isn't entered here yet.
-TEST_BASE = 90
-TEST_SHOULDER = 60
-TEST_ELBOW = 60
+# Test angles are ARM (joint) degrees, measured from the zero position
+TEST_BASE = 45
+TEST_SHOULDER = 30
+TEST_ELBOW = 45
 
 # ---------------------------------------------------------------
 # MOTORS (base = A, shoulder = B, elbow = C)
@@ -47,9 +53,14 @@ def show(text):
     print(text)
 
 
-def go_to(motor, angle):
-    motor.run_target(MOVE_SPEED, angle, then=Stop.HOLD, wait=True)
+def go_to(motor, ratio, arm_angle):
+    # Convert the joint angle to the motor angle, then move there
+    motor.run_target(MOVE_SPEED, arm_angle * ratio, then=Stop.HOLD, wait=True)
     wait(300)
+
+
+def arm_angle(motor, ratio):
+    return round(motor.angle() / ratio)
 
 
 # ---------------------------------------------------------------
@@ -76,18 +87,21 @@ wait(1000)
 
 # 3. Small test moves, one joint at a time, returning to 0 after each
 show("Base")
-go_to(base, TEST_BASE)
-go_to(base, 0)
+go_to(base, BASE_RATIO, TEST_BASE)
+go_to(base, BASE_RATIO, 0)
 
 show("Shoulder")
-go_to(shoulder, TEST_SHOULDER)
-go_to(shoulder, 0)
+go_to(shoulder, SHOULDER_RATIO, TEST_SHOULDER)
+go_to(shoulder, SHOULDER_RATIO, 0)
 
 show("Elbow")
-go_to(elbow, TEST_ELBOW)
-go_to(elbow, 0)
+go_to(elbow, ELBOW_RATIO, TEST_ELBOW)
+go_to(elbow, ELBOW_RATIO, 0)
 
-# 4. Report where each joint ended up (should all be close to 0)
-show("A:{} B:{} C:{}".format(base.angle(), shoulder.angle(), elbow.angle()))
+# 4. Report where each joint ended up in arm degrees (should all be close to 0)
+show("A:{} B:{} C:{}".format(
+    arm_angle(base, BASE_RATIO),
+    arm_angle(shoulder, SHOULDER_RATIO),
+    arm_angle(elbow, ELBOW_RATIO)))
 ev3.speaker.beep()
 wait(3000)
