@@ -1,7 +1,7 @@
 """
 Simulator for EV3 MicroPython arm scripts (no brick needed).
 
-Usage:   py simulate.py [your_script.py] [--no-visual | --live]
+Usage:   py simulate.py [your_script.py] [--scenario | --no-visual]
          (default script: arm_test.py)
 
 It replaces the pybricks library with a fake one that models each motor as a
@@ -10,16 +10,20 @@ windows (it comes with Python on Windows).
 
 Two ways to run it:
 
-  Scenario (default)  The SCENARIO list below plays the part of "you": it
-                      presses the touch sensor and the remote's buttons on a
-                      timeline. When it is used up, a window replays the motion.
-                      Good for quickly re-checking the logic after an edit.
+  Live (default)     Opens a window with a DIGITAL REMOTE: the IR remote with
+                     its red channel switch and beacon button, the touch
+                     sensor, and the brick's buttons and screen. You drive the
+                     simulated arm yourself, in real time, and nothing runs
+                     unless you press it (the demo only runs if you press the
+                     brick's UP button). Close the window or click Back to stop
+                     the program, like on the brick.
 
-  --live              Opens a window with a DIGITAL REMOTE: the IR remote with
-                      its red channel switch and beacon button, the touch
-                      sensor, and the brick's buttons and screen. You drive the
-                      simulated arm yourself, in real time. Close the window or
-                      click Back to stop the program, like on the brick.
+  --scenario         The SCENARIO list below plays the part of "you": it
+                     presses the touch sensor and the remote's buttons on a
+                     timeline, ending with the demo. When it is used up, a
+                     window replays the motion. Good for quickly re-checking
+                     the logic after an edit. --no-visual does the same without
+                     the replay window.
 
 What it models: the motors (moving over time, so run(), run_target(wait=False)
 and run_until_stalled() all work), hard stops, the touch sensor, the IR sensor
@@ -65,7 +69,7 @@ SENSOR_READ_MS = 10    # simulated time one sensor read takes (a guess: measure 
 TAIL_SECONDS = 1.0     # keep simulating this long after the scenario has finished
 MAX_SIM_SECONDS = 900  # safety stop so a stuck script cannot run forever (scenario mode only)
 
-# Live mode (--live)
+# Live mode (the default)
 MIN_PRESS_S = 0.3      # a click counts as a press at least this long (simulated seconds),
                        # because your script only looks at the buttons every so often
 
@@ -84,9 +88,9 @@ MIN_PRESS_S = 0.3      # a click counts as a press at least this long (simulated
 #                                            LEFT_UP LEFT_DOWN RIGHT_UP RIGHT_DOWN BEACON
 #   ("brick", button, seconds)               hold a brick button: UP DOWN LEFT RIGHT
 #
-# The simulation ends TAIL_SECONDS after the last action. The default
-# scenario homes the arm, then drives every joint to both ends of its range
-# from the remote, then runs the demo.
+# Only used with --scenario or --no-visual. The simulation ends TAIL_SECONDS
+# after the last action. The default scenario homes the arm, then drives every
+# joint to both ends of its range from the remote, then runs the demo.
 SCENARIO = [
     ("pause", 0.5),
     ("touch", 0.3),                        # touch sensor: home the arm
@@ -693,7 +697,7 @@ def show_visual(end_time):
 
 
 # ---------------------------------------------------------------
-# LIVE WINDOW WITH THE DIGITAL REMOTE (--live)
+# LIVE WINDOW WITH THE DIGITAL REMOTE (the default)
 # ---------------------------------------------------------------
 def run_live(script):
     import tkinter as tk
@@ -835,16 +839,17 @@ def run_live(script):
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     visual = "--no-visual" not in sys.argv
+    scripted = "--scenario" in sys.argv or "--no-visual" in sys.argv
     script = args[0] if args else "arm_test.py"
     if SEED is not None:
         random.seed(SEED)
-    if "--live" in sys.argv:
+    if not scripted:
         _install_fake_pybricks()
         print("Live simulation of {} (close the window to stop) ...\n".format(script))
         try:
             run_live(script)
         except ImportError:
-            print("--live needs tkinter, which isn't available here.")
+            print("The live window needs tkinter, which isn't available here. Use --scenario or --no-visual.")
             sys.exit(1)
         sys.exit(0)
     _load_scenario()

@@ -48,22 +48,22 @@ its range so it never drives into a stop.
     cd robot-arm
     py simulate.py arm_test.py
 
-This follows a scripted `SCENARIO` list at the top of `simulate.py` (touch
-press, remote buttons, brick buttons), then opens a window that replays the
-motion. Edit the list to try other sequences. Add `--no-visual` to skip the
-window.
-
-For a digital remote, run:
-
-    py simulate.py arm_test.py --live
-
 This opens a window with the arm, an on-screen IR remote (red channel switch,
 four buttons and the beacon button), the touch sensor, the brick's buttons and
-screen, and a speed control. You drive the simulated arm in real time. Keyboard
-shortcuts let you hold two remote buttons at once: W / S for the left pair, the
-Up / Down arrows for the right pair, T for the touch sensor, 1 to 4 for the red
-switch and Enter for the brick's Centre button. Close the window or click Back
-to stop.
+screen, and a speed control. You drive the simulated arm in real time, and
+nothing runs unless you press it. Keyboard shortcuts let you hold two remote
+buttons at once: W / S for the left pair, the Up / Down arrows for the right
+pair, T for the touch sensor, 1 to 4 for the red switch and Enter for the
+brick's Centre button. Close the window or click Back to stop.
+
+To run a scripted sequence instead, use:
+
+    py simulate.py arm_test.py --scenario
+
+This follows the `SCENARIO` list at the top of `simulate.py` (touch press,
+remote buttons, brick buttons, then the demo), then opens a window that replays
+the motion. Edit the list to try other sequences. Add `--no-visual` to skip the
+window.
 
 The simulator checks logic, directions, gear-ratio maths and limits. It does not
 model real torque, gear slip, motor acceleration or collisions.
