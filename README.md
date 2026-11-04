@@ -17,7 +17,8 @@ MicroPython (pybricks) from VS Code.
 - **Homing:** every joint is driven slowly into its limit stop, and that
   position becomes 0. Each joint then turns back to a ready pose. The base and
   shoulder stop at fixed maximum angles (base 200, shoulder 145). The elbow has
-  no maximum angle yet.
+  no confirmed maximum angle yet, so remote jogging uses a provisional limit of
+  180 degrees until the real range is known.
 - **Speeds** are in degrees per second at the joint. The code multiplies by each
   joint's gear ratio to get the motor speed.
 
@@ -73,14 +74,14 @@ model real torque, gear slip, motor acceleration or collisions.
 - **Gripper:** waiting on another motor for the gripper, so the arm has no
   gripper yet.
 - **Building instructions:** designing the building instructions for the arm.
-- **Testing:** work in progress. Homing and remote jogging have been tried on
-  the real arm. The demo routine and the new 20:12 elbow gearing still need to
-  be checked, and the base and shoulder gear ratios are assumed rather than
-  measured.
+- **Elbow maximum angle:** not set yet. It depends on the finished build with
+  the gripper motor, so it will be set once that is fitted.
+- **Testing:** work in progress. Homing, remote jogging and the 20:12 elbow
+  gearing have been tried on the real arm. The demo routine still needs to be
+  run on the arm and its angles checked for clearance.
 
-**Known issue:** before the elbow was rebuilt, it stopped at about 90 degrees
-when asked to turn back 135 degrees. The new gearing was added to try to fix
-this, and the cause has not been confirmed.
+**Fixed:** before the elbow was rebuilt, it stopped at about 90 degrees when
+asked to turn back 135 degrees. The 20:12 gearing fixed this.
 
 ## Setup
 
