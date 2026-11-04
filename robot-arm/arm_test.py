@@ -63,7 +63,8 @@ ELBOW_HOME_DUTY = 20     # % torque limit while homing the elbow (needs >20% to 
 # never goes past them. No far-limit stall testing is done any more.
 BASE_MAX_ANGLE = 200
 SHOULDER_MAX_ANGLE = 145
-# Elbow has no confirmed limit yet, so it is not clamped.
+# Elbow has no confirmed limit yet, so go_to() does not clamp it. Remote jogging
+# uses the provisional ELBOW_JOG_MAX below instead.
 
 # Test angles are ARM (joint) degrees, measured from the zero position
 TEST_BASE = 45
@@ -101,9 +102,11 @@ BASE_JOG_SPEED = 50
 SHOULDER_JOG_SPEED = 50
 ELBOW_JOG_SPEED = 120  # = 200 motor deg/s, the smoothest elbow speed, see above
 
-# Elbow upper limit for remote jogging, in arm degrees. None = no limit (like go_to).
-# Set this once you have measured the elbow's real range.
-ELBOW_JOG_MAX = None
+# Elbow upper limit for remote jogging, in arm degrees. None = no limit.
+# PROVISIONAL: 180 is not a measured limit. It is the largest elbow angle already
+# commanded without trouble on the old elbow build. Replace it with the real
+# maximum once the gripper motor is fitted and the elbow's range is known.
+ELBOW_JOG_MAX = 180
 
 # ---------------------------------------------------------------
 # MOTORS (base = A, shoulder = B, elbow = C)
@@ -182,7 +185,7 @@ def home_elbow():
     print("elbow angle after homing:", elbow.angle())
 
     show("Elbow back {} deg".format(ELBOW_TURN_BACK_AFTER_HOME))
-    go_to_logged(elbow, ELBOW_RATIO, ELBOW_TURN_BACK_AFTER_HOME, ELBOW_MOVE_SPEED)
+    go_to(elbow, ELBOW_RATIO, ELBOW_TURN_BACK_AFTER_HOME, speed=ELBOW_MOVE_SPEED)
     print("elbow angle after turn-back:", elbow.angle())
 
 
@@ -321,7 +324,7 @@ def jog_joint(i, direction):
         elif high is not None:
             motor.run_target(motor_speed, round(high * ratio), then=Stop.HOLD, wait=False)
         else:
-            motor.run(motor_speed)   # no upper limit set (elbow)
+            motor.run(motor_speed)   # no upper limit set (only if ELBOW_JOG_MAX is None)
         jog_state[i] = direction
 
 
