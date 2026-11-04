@@ -1,19 +1,31 @@
 """
 Simulator for EV3 MicroPython arm scripts (no brick needed).
 
-Usage:   py simulate.py [your_script.py] [--no-visual]
+Usage:   py simulate.py [your_script.py] [--no-visual | --live]
          (default script: arm_test.py)
 
 It replaces the pybricks library with a fake one that models each motor as a
-shaft with hard stops. Your script runs unchanged. When the scenario below has
-finished, a window opens that replays the motion (needs tkinter, which comes
-with Python on Windows).
+shaft with hard stops. Your script runs unchanged. Needs tkinter for the
+windows (it comes with Python on Windows).
+
+Two ways to run it:
+
+  Scenario (default)  The SCENARIO list below plays the part of "you": it
+                      presses the touch sensor and the remote's buttons on a
+                      timeline. When it is used up, a window replays the motion.
+                      Good for quickly re-checking the logic after an edit.
+
+  --live              Opens a window with a DIGITAL REMOTE: the IR remote with
+                      its red channel switch and beacon button, the touch
+                      sensor, and the brick's buttons and screen. You drive the
+                      simulated arm yourself, in real time. Close the window or
+                      click Back to stop the program, like on the brick.
 
 What it models: the motors (moving over time, so run(), run_target(wait=False)
 and run_until_stalled() all work), hard stops, the touch sensor, the IR sensor
 with the remote's four channels, and the brick buttons. Your script's
-"while True" loop is fine: the simulation ends once the SCENARIO below is
-used up.
+"while True" loop is fine: in scenario mode the simulation ends once the
+SCENARIO below is used up.
 
 This checks the logic, direction handling, gear-ratio maths, limits and the
 order of moves. It does NOT model real torque, real stall detection, gear
@@ -24,6 +36,9 @@ import types
 import runpy
 import random
 import bisect
+import time
+import threading
+import traceback
 
 # ---------------------------------------------------------------
 # WORLD SETTINGS: edit these to describe your real arm
@@ -48,7 +63,11 @@ SEED = None            # set a number for repeatable random starting positions
 STEP = 0.01            # seconds per simulation step
 SENSOR_READ_MS = 10    # simulated time one sensor read takes (a guess: measure your own)
 TAIL_SECONDS = 1.0     # keep simulating this long after the scenario has finished
-MAX_SIM_SECONDS = 900  # safety stop so a stuck script cannot run forever
+MAX_SIM_SECONDS = 900  # safety stop so a stuck script cannot run forever (scenario mode only)
+
+# Live mode (--live)
+MIN_PRESS_S = 0.3      # a click counts as a press at least this long (simulated seconds),
+                       # because your script only looks at the buttons every so often
 
 # ---------------------------------------------------------------
 # SCENARIO: what "you" do while the simulation runs
@@ -98,6 +117,34 @@ class _Clock:
 EVENTS = []   # (time, text) for the replay captions
 TRACK = {}    # joint name -> list of (time, arm angle from its stop in degrees)
 MOTORS = []   # every motor the script has created
+
+
+class _Live:
+    # State shared between the simulation thread and the digital remote window.
+    # Button names are "touch", "ir:LEFT_UP" (remote) and "brick:UP" (brick).
+    on = False
+    speed = 1.0       # simulated seconds per real second
+    wall0 = 0.0       # real time at simulated time 0, used to pace the simulation
+    stop = False      # set by the Back button or by closing the window
+    status = ""       # message shown under the arm drawing
+    channel = 1       # the red switch on the remote (1 to 4)
+    beacon = False    # the remote's beacon button (latched on or off)
+    down = set()      # buttons the mouse or keyboard is holding right now
+    until = {}        # name -> simulated time until which it still counts as pressed
+    screen = []       # lines on the brick's screen
+
+    @classmethod
+    def press(cls, name):
+        cls.down.add(name)
+        cls.until[name] = _Clock.t + MIN_PRESS_S
+
+    @classmethod
+    def release(cls, name):
+        cls.down.discard(name)
+
+    @classmethod
+    def held(cls, name):
+        return name in cls.down or _Clock.t < cls.until.get(name, -1.0)
 
 
 def log(msg):
@@ -150,16 +197,36 @@ class Button:
 # ---------------------------------------------------------------
 # TIME
 # ---------------------------------------------------------------
+def _pace():
+    # Live mode: sleep so that simulated time runs at _Live.speed times real time.
+    target = _Live.wall0 + _Clock.t / _Live.speed
+    delay = target - time.time()
+    if delay > 0:
+        time.sleep(delay)
+    elif delay < -1.0:
+        # we have fallen behind (slow PC or high speed): don't try to catch up
+        _Live.wall0 = time.time() - _Clock.t / _Live.speed
+
+
+def _set_live_speed(v):
+    _Live.speed = v
+    _Live.wall0 = time.time() - _Clock.t / v
+
+
 def _advance(seconds):
     # Move time forward in small steps, moving every motor as it goes.
     remaining = seconds
     while remaining > 1e-9:
+        if _Live.on and _Live.stop:
+            raise SimulationEnd()
         dt = min(STEP, remaining)
         for m in MOTORS:
             m._step(dt)
         _Clock.t += dt
         remaining -= dt
-        if _Clock.t > MAX_SIM_SECONDS:
+        if _Live.on:
+            _pace()
+        elif _Clock.t > MAX_SIM_SECONDS:
             print("\nSimulation stopped: reached MAX_SIM_SECONDS ({}).".format(MAX_SIM_SECONDS))
             raise SimulationEnd()
 
@@ -380,7 +447,7 @@ def _current_action():
 def _poll():
     # Every sensor read costs a little time, then looks at what "you" are doing.
     _advance(SENSOR_READ_MS / 1000.0)
-    if not _Scenario.armed:
+    if _Live.on or not _Scenario.armed:
         return None
     act = _current_action()
     if act is None:
@@ -401,7 +468,12 @@ class TouchSensor:
     def pressed(self):
         _Scenario.armed = True   # the script is past its start-up wait: the scenario can begin
         act = _poll()
+        if _Live.on:
+            return _Live.held("touch")
         return act is not None and act["kind"] == "touch"
+
+
+IR_BUTTON_NAMES = ("LEFT_UP", "LEFT_DOWN", "RIGHT_UP", "RIGHT_DOWN")
 
 
 class InfraredSensor:
@@ -410,6 +482,13 @@ class InfraredSensor:
 
     def buttons(self, channel):
         act = _poll()
+        if _Live.on:
+            if channel != _Live.channel:
+                return []
+            if _Live.beacon:
+                # like the real remote: with the beacon on, no other buttons are reported
+                return [Button.BEACON]
+            return [getattr(Button, n) for n in IR_BUTTON_NAMES if _Live.held("ir:" + n)]
         if act is not None and act["kind"] == "remote" and act["channel"] == channel:
             return list(act["buttons"])
         return []
@@ -417,12 +496,14 @@ class InfraredSensor:
 
 class _Screen:
     def clear(self):
-        pass
+        _Live.screen = []
 
     def print(self, *args, **kwargs):
         # the script's own print() already shows this in the terminal,
-        # so just record it for the replay captions
-        EVENTS.append((_Clock.t, "Screen: " + " ".join(str(a) for a in args).replace("\n", " | ")))
+        # so just record it for the replay captions and the live brick screen
+        text = " ".join(str(a) for a in args)
+        EVENTS.append((_Clock.t, "Screen: " + text.replace("\n", " | ")))
+        _Live.screen = _Live.screen + text.split("\n")
 
 
 class _Speaker:
@@ -433,8 +514,11 @@ class _Speaker:
 
 class _Buttons:
     def pressed(self):
-        # the centre button counts as pressed straight away; other brick
-        # buttons come from the scenario
+        if _Live.on:
+            return [getattr(Button, n) for n in ("CENTER", "UP", "DOWN", "LEFT", "RIGHT")
+                    if _Live.held("brick:" + n)]
+        # scenario mode: the centre button counts as pressed straight away;
+        # other brick buttons come from the scenario
         result = [Button.CENTER]
         if _Scenario.armed:
             act = _current_action()
@@ -463,6 +547,52 @@ def _install_fake_pybricks():
     root.parameters = mod("pybricks.parameters", Port=Port, Direction=Direction,
                           Stop=Stop, Button=Button)
     root.tools = mod("pybricks.tools", wait=wait, StopWatch=StopWatch)
+
+
+# ---------------------------------------------------------------
+# ARM DRAWING (shared by the replay and the live window)
+# ---------------------------------------------------------------
+def draw_arm(canvas, W, b, s, e, caption_text, t):
+    # Draws the arm: top view of the base, side view of shoulder and elbow.
+    # b, s and e are arm degrees away from each joint's stop.
+    import math
+    canvas.delete("all")
+
+    # top view: the base turning
+    cx, cy, R = 210, 205, 130
+    canvas.create_text(cx, 25, text="TOP VIEW (base)", font=("Arial", 12, "bold"))
+    canvas.create_oval(cx - R, cy - R, cx + R, cy + R, outline="#bbbbbb")
+    canvas.create_line(cx + R - 12, cy, cx + R + 18, cy, fill="red", width=5)
+    canvas.create_text(cx + R + 4, cy - 14, text="stop = 0", fill="red", font=("Arial", 9))
+    a = math.radians(b)
+    canvas.create_line(cx, cy, cx + (R - 10) * math.cos(a), cy - (R - 10) * math.sin(a),
+                       fill="#1f6feb", width=7, capstyle="round")
+    canvas.create_oval(cx - 8, cy - 8, cx + 8, cy + 8, fill="#444444")
+
+    # side view: shoulder and elbow
+    px, py = 640, 330
+    canvas.create_text(640, 25, text="SIDE VIEW (shoulder + elbow)", font=("Arial", 12, "bold"))
+    canvas.create_rectangle(px - 45, py + 8, px + 45, py + 50, fill="#dddddd", outline="#999999")
+    canvas.create_line(px, py, px + UPPER_ARM_LEN + 30, py, fill="red", dash=(4, 3))
+    canvas.create_text(px + UPPER_ARM_LEN + 55, py - 10, text="shoulder 0 (stop)",
+                       fill="red", font=("Arial", 9))
+    al = math.radians(s)
+    x1 = px + UPPER_ARM_LEN * math.cos(al)
+    y1 = py - UPPER_ARM_LEN * math.sin(al)
+    be = math.radians(s + e)
+    x2 = x1 + FOREARM_LEN * math.cos(be)
+    y2 = y1 - FOREARM_LEN * math.sin(be)
+    canvas.create_line(px, py, x1, y1, fill="#1f6feb", width=9, capstyle="round")
+    canvas.create_line(x1, y1, x2, y2, fill="#e8590c", width=7, capstyle="round")
+    for (x, y) in ((px, py), (x1, y1)):
+        canvas.create_oval(x - 7, y - 7, x + 7, y + 7, fill="#444444")
+    canvas.create_oval(x2 - 5, y2 - 5, x2 + 5, y2 + 5, fill="#2b8a3e")
+
+    canvas.create_text(W / 2, 372,
+                       text="base {:.0f}\u00b0     shoulder {:.0f}\u00b0     elbow {:.0f}\u00b0    (arm degrees)".format(b, s, e),
+                       font=("Arial", 12))
+    canvas.create_text(W / 2, 398, text=caption_text, font=("Arial", 10), fill="#333333")
+    canvas.create_text(50, 25, text="t = {:.1f} s".format(t), font=("Arial", 11))
 
 
 # ---------------------------------------------------------------
@@ -509,46 +639,8 @@ def show_visual(end_time):
 
     def draw():
         t = state["t"]
-        b = value("base", t)
-        s = value("shoulder", t)
-        e = value("elbow", t)
-        canvas.delete("all")
-
-        # top view: the base turning
-        cx, cy, R = 210, 205, 130
-        canvas.create_text(cx, 25, text="TOP VIEW (base)", font=("Arial", 12, "bold"))
-        canvas.create_oval(cx - R, cy - R, cx + R, cy + R, outline="#bbbbbb")
-        canvas.create_line(cx + R - 12, cy, cx + R + 18, cy, fill="red", width=5)
-        canvas.create_text(cx + R + 4, cy - 14, text="stop = 0", fill="red", font=("Arial", 9))
-        a = math.radians(b)
-        canvas.create_line(cx, cy, cx + (R - 10) * math.cos(a), cy - (R - 10) * math.sin(a),
-                           fill="#1f6feb", width=7, capstyle="round")
-        canvas.create_oval(cx - 8, cy - 8, cx + 8, cy + 8, fill="#444444")
-
-        # side view: shoulder and elbow
-        px, py = 640, 330
-        canvas.create_text(640, 25, text="SIDE VIEW (shoulder + elbow)", font=("Arial", 12, "bold"))
-        canvas.create_rectangle(px - 45, py + 8, px + 45, py + 50, fill="#dddddd", outline="#999999")
-        canvas.create_line(px, py, px + UPPER_ARM_LEN + 30, py, fill="red", dash=(4, 3))
-        canvas.create_text(px + UPPER_ARM_LEN + 55, py - 10, text="shoulder 0 (stop)",
-                           fill="red", font=("Arial", 9))
-        al = math.radians(s)
-        x1 = px + UPPER_ARM_LEN * math.cos(al)
-        y1 = py - UPPER_ARM_LEN * math.sin(al)
-        be = math.radians(s + e)
-        x2 = x1 + FOREARM_LEN * math.cos(be)
-        y2 = y1 - FOREARM_LEN * math.sin(be)
-        canvas.create_line(px, py, x1, y1, fill="#1f6feb", width=9, capstyle="round")
-        canvas.create_line(x1, y1, x2, y2, fill="#e8590c", width=7, capstyle="round")
-        for (x, y) in ((px, py), (x1, y1)):
-            canvas.create_oval(x - 7, y - 7, x + 7, y + 7, fill="#444444")
-        canvas.create_oval(x2 - 5, y2 - 5, x2 + 5, y2 + 5, fill="#2b8a3e")
-
-        canvas.create_text(W / 2, 372,
-                           text="base {:.0f}\u00b0     shoulder {:.0f}\u00b0     elbow {:.0f}\u00b0    (arm degrees)".format(b, s, e),
-                           font=("Arial", 12))
-        canvas.create_text(W / 2, 398, text=caption(t), font=("Arial", 10), fill="#333333")
-        canvas.create_text(50, 25, text="t = {:.1f} s".format(t), font=("Arial", 11))
+        draw_arm(canvas, W, value("base", t), value("shoulder", t), value("elbow", t),
+                 caption(t), t)
 
     controls = tk.Frame(root)
     controls.pack(fill="x", padx=8, pady=4)
@@ -600,12 +692,161 @@ def show_visual(end_time):
     root.mainloop()
 
 
+# ---------------------------------------------------------------
+# LIVE WINDOW WITH THE DIGITAL REMOTE (--live)
+# ---------------------------------------------------------------
+def run_live(script):
+    import tkinter as tk
+
+    _Live.on = True
+    _Live.wall0 = time.time()
+
+    root = tk.Tk()
+    root.title("Arm simulator - digital remote")
+    W, H = 900, 430
+    canvas = tk.Canvas(root, width=W, height=H, bg="white")
+    canvas.pack()
+    panel = tk.Frame(root)
+    panel.pack(fill="x", padx=8, pady=4)
+
+    def hold_button(parent, text, name, **kw):
+        # a button that counts as pressed for as long as the mouse is held on it
+        b = tk.Button(parent, text=text, **kw)
+        b.bind("<ButtonPress-1>", lambda ev: _Live.press(name))
+        b.bind("<ButtonRelease-1>", lambda ev: _Live.release(name))
+        return b
+
+    # --- the IR remote ---
+    remote = tk.LabelFrame(panel, text="IR remote")
+    remote.pack(side="left", padx=6)
+    chan = tk.IntVar(value=_Live.channel)
+
+    def set_channel():
+        _Live.channel = chan.get()
+        log("remote: red switch moved to {}".format(_Live.channel))
+
+    switch = tk.Frame(remote)
+    switch.grid(row=0, column=0, columnspan=2, pady=2)
+    tk.Label(switch, text="Red switch:").pack(side="left")
+    for n in (1, 2, 3, 4):
+        tk.Radiobutton(switch, text=str(n), variable=chan, value=n, indicatoron=0, width=3,
+                       selectcolor="#e03131", command=set_channel).pack(side="left")
+    hold_button(remote, "\u25b2 Left", "ir:LEFT_UP", width=9).grid(row=1, column=0, padx=2, pady=1)
+    hold_button(remote, "\u25b2 Right", "ir:RIGHT_UP", width=9).grid(row=1, column=1, padx=2, pady=1)
+    hold_button(remote, "\u25bc Left", "ir:LEFT_DOWN", width=9).grid(row=2, column=0, padx=2, pady=1)
+    hold_button(remote, "\u25bc Right", "ir:RIGHT_DOWN", width=9).grid(row=2, column=1, padx=2, pady=1)
+    beacon_var = tk.IntVar(value=0)
+
+    def set_beacon():
+        _Live.beacon = bool(beacon_var.get())
+        log("remote: beacon {}".format("ON" if _Live.beacon else "off"))
+
+    tk.Checkbutton(remote, text="Beacon (latches on)", variable=beacon_var,
+                   command=set_beacon).grid(row=3, column=0, columnspan=2)
+
+    # --- the touch sensor ---
+    touch_frame = tk.LabelFrame(panel, text="Touch sensor (port 1)")
+    touch_frame.pack(side="left", padx=6, fill="y")
+    hold_button(touch_frame, "Press", "touch", width=12, height=4).pack(padx=6, pady=8)
+
+    # --- the brick's buttons and screen ---
+    brick = tk.LabelFrame(panel, text="EV3 brick")
+    brick.pack(side="left", padx=6)
+    hold_button(brick, "Up", "brick:UP", width=8).grid(row=0, column=1)
+    hold_button(brick, "Centre", "brick:CENTER", width=8).grid(row=1, column=1)
+    hold_button(brick, "Down", "brick:DOWN", width=8).grid(row=2, column=1)
+
+    def back():
+        _Live.stop = True
+        _Live.status = "Back pressed: the program was stopped."
+
+    tk.Button(brick, text="Back (stop)", width=10, command=back).grid(row=1, column=0, padx=4)
+    screen = tk.Label(brick, text="", font=("Courier", 10), width=22, height=6, bg="#c9d6b0",
+                      justify="left", anchor="nw", relief="sunken")
+    screen.grid(row=0, column=2, rowspan=3, padx=6, pady=2)
+
+    # --- simulation speed ---
+    speed_frame = tk.LabelFrame(panel, text="Speed")
+    speed_frame.pack(side="left", padx=6, fill="y")
+    for label, v in (("0.5x", 0.5), ("1x", 1.0), ("2x", 2.0), ("4x", 4.0)):
+        tk.Button(speed_frame, text=label, width=5, command=lambda v=v: _set_live_speed(v)).pack(pady=1)
+
+    tk.Label(root, anchor="w", justify="left", fg="#555555", font=("Arial", 9),
+             text="Keys: W / S = remote left up / down,  Up / Down arrows = remote right up / down "
+                  "(hold two to press both),  T = touch sensor,  1-4 = red switch,  Enter = brick Centre.  "
+                  "Close the window to stop.").pack(fill="x", padx=8)
+
+    # keyboard: lets you hold two remote buttons at once, which the mouse cannot do
+    KEYS = {"w": "ir:LEFT_UP", "s": "ir:LEFT_DOWN", "Up": "ir:RIGHT_UP", "Down": "ir:RIGHT_DOWN",
+            "t": "touch", "Return": "brick:CENTER"}
+
+    def key_name(ev):
+        return ev.keysym.lower() if len(ev.keysym) == 1 else ev.keysym
+
+    def key_down(ev):
+        k = key_name(ev)
+        if k in KEYS:
+            _Live.press(KEYS[k])
+        elif k in ("1", "2", "3", "4"):
+            chan.set(int(k))
+            set_channel()
+
+    def key_up(ev):
+        k = key_name(ev)
+        if k in KEYS:
+            _Live.release(KEYS[k])
+
+    root.bind("<KeyPress>", key_down)
+    root.bind("<KeyRelease>", key_up)
+
+    def worker():
+        try:
+            runpy.run_path(script, run_name="__main__")
+            _Live.status = "The script finished by itself."
+        except SimulationEnd:
+            if not _Live.status:
+                _Live.status = "Stopped."
+        except SystemExit:
+            _Live.status = "The script stopped (see the terminal for why)."
+        except Exception:
+            traceback.print_exc()
+            _Live.status = "The script crashed (see the terminal)."
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def tick():
+        vis = {m.name: m._vis() for m in MOTORS}
+        caption = _Live.status or (EVENTS[-1][1] if EVENTS else "")
+        draw_arm(canvas, W, vis.get("base", 0.0), vis.get("shoulder", 0.0), vis.get("elbow", 0.0),
+                 caption, _Clock.t)
+        screen.config(text="\n".join(_Live.screen[-6:]))
+        root.after(30, tick)
+
+    def on_close():
+        _Live.stop = True
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    tick()
+    root.mainloop()
+    _Live.stop = True
+
+
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     visual = "--no-visual" not in sys.argv
     script = args[0] if args else "arm_test.py"
     if SEED is not None:
         random.seed(SEED)
+    if "--live" in sys.argv:
+        _install_fake_pybricks()
+        print("Live simulation of {} (close the window to stop) ...\n".format(script))
+        try:
+            run_live(script)
+        except ImportError:
+            print("--live needs tkinter, which isn't available here.")
+            sys.exit(1)
+        sys.exit(0)
     _load_scenario()
     _install_fake_pybricks()
     print("Simulating {} ...\n".format(script))
